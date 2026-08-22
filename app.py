@@ -334,7 +334,7 @@ def main():
         if auto_normalize:
             draft_input_text = normalize_stellenbosch_citations(draft_input_text)
 
-        with st.spinner("Scanning claims with Gemini 2.5 Flash..."):
+        with st.spinner("Scanning claims with Gemini..."):
             try:
                 report = run_citation_audit_gemini(
                     draft_text=draft_input_text,
@@ -346,7 +346,12 @@ def main():
                 st.session_state["audit_report"] = report
                 st.success("Scan Complete!")
             except Exception as e:
-                st.error(f"Execution Error: {str(e)}")
+                error_text = str(e)
+                if "429" in error_text or "RESOURCE_EXHAUSTED" in error_text:
+                    st.error(
+                        "🚦 This tool is being used a lot right now and has hit its free daily limit. Please come back in a little while and try again.")
+                else:
+                    st.error("Something went wrong while scanning. Please try again in a moment.")
 
     # --- RESULTS ---
     if "audit_report" in st.session_state:
