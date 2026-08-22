@@ -198,7 +198,7 @@ def main():
 
     st.title("⚖️ Stellenbosch Law Citation Pinpointer & Audit Tool")
     st.caption("Created by Aidan Roach | Faculty of Law, Stellenbosch University (Free Gemini Edition)")
-
+    st.info("🔔 This tool runs on a free-tier API. If it stops responding, the daily free usage limit has likely been reached — please try again tomorrow.")
     # --- SIDEBAR ---
     st.sidebar.header("⚙️ Configuration")
     citation_style = st.sidebar.selectbox(
