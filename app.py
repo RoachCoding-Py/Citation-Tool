@@ -49,10 +49,16 @@ def clean_legal_text(text: str) -> str:
     return text.strip()
 
 def verify_excerpt_in_source(excerpt: str, source_text: str) -> bool:
-    """Checks whether a claimed 'verbatim' excerpt actually appears in the source text,
-    ignoring differences in spacing/line breaks so PDF extraction quirks don't cause false negatives."""
+    """Checks whether a claimed 'verbatim' excerpt actually appears in the source text.
+    Tolerant of PDF-extraction noise (hyphenated line breaks, curly quotes, extra
+    spacing) without loosening how many actual words must match."""
     def normalize(t: str) -> str:
-        return re.sub(r"\s+", " ", t).strip().lower()
+        t = t.replace("\u2018", "'").replace("\u2019", "'")   # curly single quotes
+        t = t.replace("\u201c", '"').replace("\u201d", '"')   # curly double quotes
+        t = re.sub(r"-\s*\n\s*", "", t)                       # de-hyphenate line breaks
+        t = re.sub(r"\s+", " ", t)                            # collapse all whitespace
+        t = re.sub(r"[^\w\s]", "", t)                         # drop punctuation entirely
+        return t.strip().lower()
 
     normalized_excerpt = normalize(excerpt)
     normalized_source = normalize(source_text)
