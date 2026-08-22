@@ -40,10 +40,19 @@ except ImportError:
 # ==========================================
 
 def clean_legal_text(text: str) -> str:
-    """Removes common header/footer artifacts from JutaIQ, LexisNexis SA, and SAFLII."""
+    """Removes common header/footer artifacts from JutaIQ, LexisNexis SA, and SAFLII,
+    plus stray page numbers and judge-name running headers that PDF extraction
+    inserts mid-sentence (e.g. a lone '49' or 'SACHS J' on its own line)."""
     text = re.sub(r"Downloaded from JutaIQ on \d{2}/\d{2}/\d{4}.*", "", text)
     text = re.sub(r"LexisNexis South Africa \([0-9-]+\).*", "", text)
     text = re.sub(r"SAFLII Note:.*", "", text)
+
+    # Strip lines that are ONLY a page number
+    text = re.sub(r"(?m)^\s*\d{1,4}\s*$", "", text)
+
+    # Strip lines that are ONLY a judge-name running header (e.g. "SACHS J", "CHASKALSON P")
+    text = re.sub(r"(?m)^\s*[A-Z][A-Z\s]{2,30}[A-Z]{1,2}\s*$", "", text)
+
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
@@ -344,6 +353,7 @@ def main():
         report: AuditReport = st.session_state["audit_report"]
 
         st.markdown("## 📊 Audit Results")
+        st.warning("⚠️ **This tool is not perfect.** VERIFIED does not guarantee the citation is correct, and UNVERIFIED does not always mean it's wrong — PDF text extraction can occasionally split sentences awkwardly and cause false flags. Always check every citation against the original source before relying on it.")
         total_claims = len(report.audit_items)
         verified_claims = sum(1 for item in report.audit_items if item.confidence_status == "VERIFIED")
         unverified_claims = total_claims - verified_claims
