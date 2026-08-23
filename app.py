@@ -22,7 +22,6 @@ from streamlit_local_storage import LocalStorage
 # Safely load python-dotenv if installed
 try:
     from dotenv import load_dotenv
-
     load_dotenv()
 except ImportError:
     pass
@@ -58,21 +57,22 @@ def clean_legal_text(text: str) -> str:
     return text.strip()
 
 
+def _normalize_for_matching(t: str) -> str:
+    """Shared normalization used by both the verification and duplicate-count checks.
+    Handles curly quotes, hyphenated line breaks, and punctuation/whitespace noise
+    introduced by PDF text extraction."""
+    t = t.replace("\u2018", "'").replace("\u2019", "'")
+    t = t.replace("\u201c", '"').replace("\u201d", '"')
+    t = re.sub(r"-\s*\n\s*", "", t)
+    t = re.sub(r"\s+", " ", t)
+    t = re.sub(r"[^\w\s]", "", t)
+    return t.strip().lower()
+
+
 def verify_excerpt_in_source(excerpt: str, source_text: str) -> bool:
-    """Checks whether a claimed 'verbatim' excerpt actually appears in the source text.
-    Tolerant of PDF-extraction noise (hyphenated line breaks, curly quotes, extra
-    spacing) without loosening how many actual words must match."""
-
-    def normalize(t: str) -> str:
-        t = t.replace("\u2018", "'").replace("\u2019", "'")
-        t = t.replace("\u201c", '"').replace("\u201d", '"')
-        t = re.sub(r"-\s*\n\s*", "", t)
-        t = re.sub(r"\s+", " ", t)
-        t = re.sub(r"[^\w\s]", "", t)
-        return t.strip().lower()
-
-    normalized_excerpt = normalize(excerpt)
-    normalized_source = normalize(source_text)
+    """Checks whether a claimed 'verbatim' excerpt actually appears in the source text."""
+    normalized_excerpt = _normalize_for_matching(excerpt)
+    normalized_source = _normalize_for_matching(source_text)
 
     if len(normalized_excerpt) < 10:
         return False
@@ -82,17 +82,8 @@ def verify_excerpt_in_source(excerpt: str, source_text: str) -> bool:
 
 def count_occurrences_in_source(excerpt: str, source_text: str) -> int:
     """Counts how many times a normalized excerpt appears in the source text."""
-
-    def normalize(t: str) -> str:
-        t = t.replace("\u2018", "'").replace("\u2019", "'")
-        t = t.replace("\u201c", '"').replace("\u201d", '"')
-        t = re.sub(r"-\s*\n\s*", "", t)
-        t = re.sub(r"\s+", " ", t)
-        t = re.sub(r"[^\w\s]", "", t)
-        return t.strip().lower()
-
-    normalized_excerpt = normalize(excerpt)
-    normalized_source = normalize(source_text)
+    normalized_excerpt = _normalize_for_matching(excerpt)
+    normalized_source = _normalize_for_matching(source_text)
 
     if len(normalized_excerpt) < 10:
         return 0
@@ -103,45 +94,24 @@ def count_occurrences_in_source(excerpt: str, source_text: str) -> int:
 def cross_check_audit_report(report: "AuditReport", sources: List[dict]) -> "AuditReport":
     """Re-checks every audit item's claimed excerpt against the real source text.
     Downgrades to UNVERIFIED if the excerpt cannot be found, and flags with an
-    asterisk if the excerpt appears more than once (the pinpoint may not be unique)."""
+    asterisk if the excerpt appears more than once (the pinpoint may not be unique).
+    Matches sources loosely, since the model doesn't always echo back the exact
+    title string the user typed in."""
 
-    def cross_check_audit_report(report: "AuditReport", sources: List[dict]) -> "AuditReport":
-        """Re-checks every audit item's claimed excerpt against the real source text.
-        Downgrades to UNVERIFIED if the excerpt cannot be found, and flags with an
-        asterisk if the excerpt appears more than once (the pinpoint may not be unique).
-        Matches sources loosely, since the model doesn't always echo back the exact
-        title string the user typed in."""
-
-        def find_source_text(claimed_title: str) -> str:
-            claimed_lower = claimed_title.lower().strip()
-            # Exact match first
-            for s in sources:
-                if s["title"].lower().strip() == claimed_lower:
-                    return s["content"]
-            # Partial match (claimed title contains or is contained in the real title)
-            for s in sources:
-                if s["title"].lower().strip() in claimed_lower or claimed_lower in s["title"].lower().strip():
-                    return s["content"]
-            # Fallback: only one source uploaded, so it must be that one
-            if len(sources) == 1:
-                return sources[0]["content"]
-            return ""
-
-        for item in report.audit_items:
-            source_text = find_source_text(item.matched_source_title)
-            occurrences = count_occurrences_in_source(item.verbatim_source_excerpt, source_text)
-
-            if occurrences == 0 and item.confidence_status == "VERIFIED":
-                item.confidence_status = "UNVERIFIED"
-                item.pinpoint_citation = "[UNVERIFIED - EXCERPT NOT FOUND IN SOURCE TEXT]"
-            elif occurrences > 1:
-                item.pinpoint_citation = f"{item.pinpoint_citation} *"
-                item.matched_source_title = f"{item.matched_source_title} (*appears {occurrences}x in source — pinpoint may not be unique)"
-
-        return report
+    def find_source_text(claimed_title: str) -> str:
+        claimed_lower = claimed_title.lower().strip()
+        for s in sources:
+            if s["title"].lower().strip() == claimed_lower:
+                return s["content"]
+        for s in sources:
+            if s["title"].lower().strip() in claimed_lower or claimed_lower in s["title"].lower().strip():
+                return s["content"]
+        if len(sources) == 1:
+            return sources[0]["content"]
+        return ""
 
     for item in report.audit_items:
-        source_text = source_lookup.get(item.matched_source_title, "")
+        source_text = find_source_text(item.matched_source_title)
         occurrences = count_occurrences_in_source(item.verbatim_source_excerpt, source_text)
 
         if occurrences == 0 and item.confidence_status == "VERIFIED":
@@ -152,6 +122,7 @@ def cross_check_audit_report(report: "AuditReport", sources: List[dict]) -> "Aud
             item.matched_source_title = f"{item.matched_source_title} (*appears {occurrences}x in source — pinpoint may not be unique)"
 
     return report
+
 
 def normalize_stellenbosch_citations(text: str) -> str:
     """
@@ -241,6 +212,8 @@ def generate_docx_download(annotated_text: str, citation_style: str) -> bytes:
 # 2. SCHEMA & GEMINI INFERENCE ENGINE
 # ==========================================
 
+GEMINI_MODEL_NAME = "gemini-3.6-flash"
+
 STELLENBOSCH_CITATION_SYSTEM_PROMPT = """You are a senior South African Legal Tech Specialist at Stellenbosch University Faculty of Law.
 Your role is to scan a student's legal draft against provided source material, identify claims wrapped in quotation marks ("..."), match them to exact source locations, and generate formatted pinpoint citations.
 
@@ -249,6 +222,7 @@ FORMATTING RULES:
 2. Statutes: s 12(1)(a) of the Constitution of the Republic of South Africa, 1996
 3. Insert numeric markers like [^1] immediately after quoted claims, and append a Footnotes section at the very end of the document.
 4. If a claim cannot be matched with high confidence (>85%), mark pinpoint as '[UNVERIFIED - PINPOINT NOT FOUND]' and confidence_status as 'UNVERIFIED'.
+5. For matched_source_title, always echo back EXACTLY the source title as given (e.g. "Source 1"), do not substitute the case name.
 """
 
 
@@ -278,7 +252,7 @@ def run_citation_audit_gemini(
     user_prompt = f"SELECTED STYLE: {citation_style}\n\nDRAFT:\n{draft_text}\n\nSOURCES:\n{formatted_sources}"
 
     response = client.models.generate_content(
-        model='gemini-3.6-flash',
+        model=GEMINI_MODEL_NAME,
         contents=user_prompt,
         config=types.GenerateContentConfig(
             system_instruction=STELLENBOSCH_CITATION_SYSTEM_PROMPT,
@@ -290,6 +264,7 @@ def run_citation_audit_gemini(
 
     return AuditReport.model_validate_json(response.text)
 
+
 # ==========================================
 # 3. STREAMLIT INTERFACE
 # ==========================================
@@ -297,12 +272,12 @@ def run_citation_audit_gemini(
 def main():
     st.set_page_config(page_title="SU Law Citation Pinpointer", page_icon="⚖️", layout="wide")
 
-    # Initialize Local Storage
     local_storage = LocalStorage()
 
     st.title("⚖️ Stellenbosch Law Citation Pinpointer & Audit Tool")
     st.caption("Created by Aidan Roach | Faculty of Law, Stellenbosch University (Free Gemini Edition)")
-    st.info("🔔 This tool runs on a free-tier API. If it stops responding, the daily free usage limit has likely been reached — please try again tomorrow.")
+    st.info("🔔 This tool runs on a free-tier API. If it stops responding, the daily free usage limit has likely been reached — please try again later.")
+
     # --- SIDEBAR ---
     st.sidebar.header("⚙️ Configuration")
     citation_style = st.sidebar.selectbox(
@@ -342,7 +317,6 @@ def main():
         draft_mode = st.radio("Input Method:", ["Paste Text Directly", "Upload File (.docx / .pdf)"], horizontal=True)
 
         if draft_mode == "Paste Text Directly":
-            # Retrieve saved draft from browser storage if present
             saved_draft = local_storage.getItem("user_draft_text") or ""
 
             draft_input_text = st.text_area(
@@ -352,7 +326,6 @@ def main():
                 key="draft_text_input"
             )
 
-            # Save to browser storage whenever text changes
             if draft_input_text:
                 local_storage.setItem("user_draft_text", draft_input_text)
 
@@ -420,7 +393,9 @@ def main():
         report: AuditReport = st.session_state["audit_report"]
 
         st.markdown("## 📊 Audit Results")
-        st.warning("⚠️ **This tool is not perfect.** VERIFIED does not guarantee the citation is correct, and UNVERIFIED does not always mean it's wrong — PDF text extraction can occasionally split sentences awkwardly and cause false flags. Always check every citation against the original source before relying on it.")
+        st.warning(
+            "⚠️ **This tool is not perfect.** VERIFIED does not guarantee the citation is correct, and UNVERIFIED does not always mean it's wrong — PDF text extraction can occasionally split sentences awkwardly and cause false flags. Always check every citation against the original source before relying on it.")
+
         total_claims = len(report.audit_items)
         verified_claims = sum(1 for item in report.audit_items if item.confidence_status == "VERIFIED")
         unverified_claims = total_claims - verified_claims
@@ -429,7 +404,7 @@ def main():
         m1.metric("Quoted Claims", total_claims)
         m2.metric("Verified Pinpoints", verified_claims)
         m3.metric("Unverified Flags", unverified_claims)
-        m4.metric("Model", "Gemini 2.5 Flash (Free)")
+        m4.metric("Model", f"{GEMINI_MODEL_NAME} (Free)")
 
         tab1, tab2 = st.tabs(["📝 Annotated Draft", "🔎 Audit Table"])
 
