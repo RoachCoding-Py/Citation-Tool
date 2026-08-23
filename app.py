@@ -75,19 +75,41 @@ def verify_excerpt_in_source(excerpt: str, source_text: str) -> bool:
     if len(normalized_excerpt) < 10:
         return False
 
-    return normalized_excerpt in normalized_source
+    return normalized_excerpt in normalized_sourcedef count_occurrences_in_source(excerpt: str, source_text: str) -> int:
+    """Counts how many times a normalized excerpt appears in the source text."""
+    def normalize(t: str) -> str:
+        t = t.replace("\u2018", "'").replace("\u2019", "'")
+        t = t.replace("\u201c", '"').replace("\u201d", '"')
+        t = re.sub(r"-\s*\n\s*", "", t)
+        t = re.sub(r"\s+", " ", t)
+        t = re.sub(r"[^\w\s]", "", t)
+        return t.strip().lower()
+
+    normalized_excerpt = normalize(excerpt)
+    normalized_source = normalize(source_text)
+
+    if len(normalized_excerpt) < 10:
+        return 0
+
+    return normalized_source.count(normalized_excerpt)
+
+
 def cross_check_audit_report(report: "AuditReport", sources: List[dict]) -> "AuditReport":
     """Re-checks every audit item's claimed excerpt against the real source text.
-    Downgrades to UNVERIFIED if the model's excerpt cannot actually be found."""
+    Downgrades to UNVERIFIED if the excerpt cannot be found, and flags with an
+    asterisk if the excerpt appears more than once (the pinpoint may not be unique)."""
     source_lookup = {s["title"]: s["content"] for s in sources}
 
     for item in report.audit_items:
         source_text = source_lookup.get(item.matched_source_title, "")
-        found = verify_excerpt_in_source(item.verbatim_source_excerpt, source_text)
+        occurrences = count_occurrences_in_source(item.verbatim_source_excerpt, source_text)
 
-        if not found and item.confidence_status == "VERIFIED":
+        if occurrences == 0 and item.confidence_status == "VERIFIED":
             item.confidence_status = "UNVERIFIED"
             item.pinpoint_citation = "[UNVERIFIED - EXCERPT NOT FOUND IN SOURCE TEXT]"
+        elif occurrences > 1:
+            item.pinpoint_citation = f"{item.pinpoint_citation} *"
+            item.matched_source_title = f"{item.matched_source_title} (*appears {occurrences}x in source — pinpoint may not be unique)"
 
     return report
 
