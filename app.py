@@ -104,7 +104,41 @@ def cross_check_audit_report(report: "AuditReport", sources: List[dict]) -> "Aud
     """Re-checks every audit item's claimed excerpt against the real source text.
     Downgrades to UNVERIFIED if the excerpt cannot be found, and flags with an
     asterisk if the excerpt appears more than once (the pinpoint may not be unique)."""
-    source_lookup = {s["title"]: s["content"] for s in sources}
+
+    def cross_check_audit_report(report: "AuditReport", sources: List[dict]) -> "AuditReport":
+        """Re-checks every audit item's claimed excerpt against the real source text.
+        Downgrades to UNVERIFIED if the excerpt cannot be found, and flags with an
+        asterisk if the excerpt appears more than once (the pinpoint may not be unique).
+        Matches sources loosely, since the model doesn't always echo back the exact
+        title string the user typed in."""
+
+        def find_source_text(claimed_title: str) -> str:
+            claimed_lower = claimed_title.lower().strip()
+            # Exact match first
+            for s in sources:
+                if s["title"].lower().strip() == claimed_lower:
+                    return s["content"]
+            # Partial match (claimed title contains or is contained in the real title)
+            for s in sources:
+                if s["title"].lower().strip() in claimed_lower or claimed_lower in s["title"].lower().strip():
+                    return s["content"]
+            # Fallback: only one source uploaded, so it must be that one
+            if len(sources) == 1:
+                return sources[0]["content"]
+            return ""
+
+        for item in report.audit_items:
+            source_text = find_source_text(item.matched_source_title)
+            occurrences = count_occurrences_in_source(item.verbatim_source_excerpt, source_text)
+
+            if occurrences == 0 and item.confidence_status == "VERIFIED":
+                item.confidence_status = "UNVERIFIED"
+                item.pinpoint_citation = "[UNVERIFIED - EXCERPT NOT FOUND IN SOURCE TEXT]"
+            elif occurrences > 1:
+                item.pinpoint_citation = f"{item.pinpoint_citation} *"
+                item.matched_source_title = f"{item.matched_source_title} (*appears {occurrences}x in source — pinpoint may not be unique)"
+
+        return report
 
     for item in report.audit_items:
         source_text = source_lookup.get(item.matched_source_title, "")
