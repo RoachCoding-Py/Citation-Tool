@@ -19,14 +19,12 @@ import streamlit as st
 from pydantic import BaseModel, Field
 from streamlit_local_storage import LocalStorage
 
-# Safely load python-dotenv if installed
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
     pass
 
-# Import Google GenAI SDK
 try:
     from google import genai
     from google.genai import types
@@ -39,52 +37,82 @@ except ImportError:
 # ==========================================
 
 def clean_legal_text(text: str) -> str:
-    """Removes common header/footer artifacts from JutaIQ, LexisNexis SA, and SAFLII,
-    plus stray page numbers and judge-name running headers that PDF extraction
-    inserts mid-sentence (e.g. a lone '49' or 'SACHS J' on its own line)."""
+    """Removes common header/footer artifacts from JutaIQ, LexisNexis SA, and SAFLII."""
     text = re.sub(r"Downloaded from JutaIQ on \d{2}/\d{2}/\d{4}.*", "", text)
     text = re.sub(r"LexisNexis South Africa \([0-9-]+\).*", "", text)
     text = re.sub(r"SAFLII Note:.*", "", text)
-
-    text = re.sub(r"(?m)^\s*\d{1,4}\s*$", "", text)
-    text = re.sub(r"(?m)^\s*[A-Z][A-Z\s]{2,30}[A-Z]{1,2}\s*$", "", text)
-
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
-def _normalize_for_matching(t: str) -> str:
-    """Shared normalization used by both the verification and duplicate-count checks."""
+def _tokenize(t: str) -> List[str]:
+    """Turns text into a clean list of lowercase word tokens, rejoining hyphenated
+    line breaks first so split words don't become two separate tokens."""
     t = t.replace("\u2018", "'").replace("\u2019", "'")
     t = t.replace("\u201c", '"').replace("\u201d", '"')
     t = re.sub(r"-\s*\n\s*", "", t)
-    t = re.sub(r"\d+", "", t)
-    t = re.sub(r"[^\w\s]", "", t)
-    t = re.sub(r"\s+", " ", t)
-    return t.strip().lower()
+    return re.findall(r"[a-z0-9']+", t.lower())
+
+
+def _find_match_starts(excerpt_words: List[str], source_words: List[str], max_gap: int = 10) -> List[int]:
+    """Finds every position in source_words where excerpt_words appears in order,
+    allowing up to `max_gap` unrelated words between each pair of matched words
+    (to tolerate footnote numbers, page numbers, and running headers that PDF
+    extraction sometimes inserts mid-sentence). Every actual word of the excerpt
+    still has to be found, in the right order — this does not allow substitutions,
+    only insertions, so a genuinely fabricated quote will not pass."""
+    starts = []
+    n, m = len(source_words), len(excerpt_words)
+    if m == 0:
+        return starts
+
+    for i in range(n):
+        if source_words[i] != excerpt_words[0]:
+            continue
+        si, ei = i, 0
+        matched = True
+        while ei < m:
+            found_at = None
+            for skip in range(0, max_gap + 1):
+                if si + skip < n and source_words[si + skip] == excerpt_words[ei]:
+                    found_at = si + skip
+                    break
+            if found_at is None:
+                matched = False
+                break
+            si = found_at + 1
+            ei += 1
+        if matched:
+            starts.append(i)
+
+    return starts
 
 
 def verify_excerpt_in_source(excerpt: str, source_text: str) -> bool:
-    normalized_excerpt = _normalize_for_matching(excerpt)
-    normalized_source = _normalize_for_matching(source_text)
-    if len(normalized_excerpt) < 10:
+    """Checks whether a claimed 'verbatim' excerpt's words all appear, in order,
+    in the source text (tolerant of small PDF-extraction insertions)."""
+    excerpt_words = _tokenize(excerpt)
+    source_words = _tokenize(source_text)
+    if len(excerpt_words) < 4:
         return False
-    return normalized_excerpt in normalized_source
+    return len(_find_match_starts(excerpt_words, source_words)) > 0
 
 
 def count_occurrences_in_source(excerpt: str, source_text: str) -> int:
-    normalized_excerpt = _normalize_for_matching(excerpt)
-    normalized_source = _normalize_for_matching(source_text)
-    if len(normalized_excerpt) < 10:
+    """Counts how many separate positions in the source match the excerpt."""
+    excerpt_words = _tokenize(excerpt)
+    source_words = _tokenize(source_text)
+    if len(excerpt_words) < 4:
         return 0
-    return normalized_source.count(normalized_excerpt)
+    return len(_find_match_starts(excerpt_words, source_words))
 
 
 def cross_check_audit_report(report: "AuditReport", sources: List[dict]) -> "AuditReport":
     """Re-checks every audit item's claimed excerpt against the real source text.
     Downgrades to UNVERIFIED if the excerpt cannot be found, and flags with an
-    asterisk if the excerpt appears more than once."""
+    asterisk if the excerpt appears more than once. Matches sources loosely,
+    since the model doesn't always echo back the exact title string typed in."""
 
     def find_source_text(claimed_title: str) -> str:
         claimed_lower = claimed_title.lower().strip()
@@ -126,22 +154,18 @@ def parse_docx_file(file_bytes: bytes) -> str:
 
 
 def parse_pdf_draft(file_bytes: bytes) -> str:
-    """Extracts plain text from draft PDFs, using reading-order extraction to avoid
-    footnotes/headers interleaving into the middle of sentences."""
     doc = fitz.open(stream=file_bytes, filetype="pdf")
-    pages_text = [page.get_text("text", sort=True).strip() for page in doc if page.get_text("text", sort=True).strip()]
+    pages_text = [page.get_text("text").strip() for page in doc if page.get_text("text").strip()]
     doc.close()
     return clean_legal_text("\n\n".join(pages_text))
 
 
 def parse_and_anchor_pdf(file_bytes: bytes) -> str:
-    """Extracts PDF text and injects structural [[PAGE X]] markers, using
-    reading-order extraction to avoid footnotes/headers interleaving mid-sentence."""
     anchored_text = []
     try:
         doc = fitz.open(stream=file_bytes, filetype="pdf")
         for page_num in range(len(doc)):
-            page_text = clean_legal_text(doc[page_num].get_text("text", sort=True))
+            page_text = clean_legal_text(doc[page_num].get_text("text"))
             anchored_text.append(f"[[PAGE {page_num + 1}]]\n{page_text}")
         doc.close()
     except Exception:
