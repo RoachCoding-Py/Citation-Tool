@@ -46,10 +46,7 @@ def clean_legal_text(text: str) -> str:
     text = re.sub(r"LexisNexis South Africa \([0-9-]+\).*", "", text)
     text = re.sub(r"SAFLII Note:.*", "", text)
 
-    # Strip lines that are ONLY a page number
     text = re.sub(r"(?m)^\s*\d{1,4}\s*$", "", text)
-
-    # Strip lines that are ONLY a judge-name running header (e.g. "SACHS J", "CHASKALSON P")
     text = re.sub(r"(?m)^\s*[A-Z][A-Z\s]{2,30}[A-Z]{1,2}\s*$", "", text)
 
     text = re.sub(r"[ \t]+", " ", text)
@@ -58,11 +55,7 @@ def clean_legal_text(text: str) -> str:
 
 
 def _normalize_for_matching(t: str) -> str:
-    """Shared normalization used by both the verification and duplicate-count checks.
-    Handles curly quotes, hyphenated line breaks, punctuation/whitespace noise, and
-    stray digits (page numbers, footnote markers) that PDF extraction can insert
-    mid-sentence — since both sides of the comparison are normalized identically,
-    stripping digits doesn't create false positives, only removes false negatives."""
+    """Shared normalization used by both the verification and duplicate-count checks."""
     t = t.replace("\u2018", "'").replace("\u2019", "'")
     t = t.replace("\u201c", '"').replace("\u201d", '"')
     t = re.sub(r"-\s*\n\s*", "", t)
@@ -73,33 +66,25 @@ def _normalize_for_matching(t: str) -> str:
 
 
 def verify_excerpt_in_source(excerpt: str, source_text: str) -> bool:
-    """Checks whether a claimed 'verbatim' excerpt actually appears in the source text."""
     normalized_excerpt = _normalize_for_matching(excerpt)
     normalized_source = _normalize_for_matching(source_text)
-
     if len(normalized_excerpt) < 10:
         return False
-
     return normalized_excerpt in normalized_source
 
 
 def count_occurrences_in_source(excerpt: str, source_text: str) -> int:
-    """Counts how many times a normalized excerpt appears in the source text."""
     normalized_excerpt = _normalize_for_matching(excerpt)
     normalized_source = _normalize_for_matching(source_text)
-
     if len(normalized_excerpt) < 10:
         return 0
-
     return normalized_source.count(normalized_excerpt)
 
 
 def cross_check_audit_report(report: "AuditReport", sources: List[dict]) -> "AuditReport":
     """Re-checks every audit item's claimed excerpt against the real source text.
     Downgrades to UNVERIFIED if the excerpt cannot be found, and flags with an
-    asterisk if the excerpt appears more than once (the pinpoint may not be unique).
-    Matches sources loosely, since the model doesn't always echo back the exact
-    title string the user typed in."""
+    asterisk if the excerpt appears more than once."""
 
     def find_source_text(claimed_title: str) -> str:
         claimed_lower = claimed_title.lower().strip()
@@ -128,12 +113,6 @@ def cross_check_audit_report(report: "AuditReport", sources: List[dict]) -> "Aud
 
 
 def normalize_stellenbosch_citations(text: str) -> str:
-    """
-    Automated Rule-Based NLP Normalizer.
-    Converts non-standard citations to Stellenbosch Faculty format:
-    - 'Section 12' / 'Sec 12' -> 's 12'
-    - 'Paragraph 10' / 'Par 10' -> 'para 10'
-    """
     text = re.sub(r"\b(?:Section|Sec\.)\s+(\d+)", r"s \1", text, flags=re.IGNORECASE)
     text = re.sub(r"\b(?:Sections|Secs\.)\s+(\d+)", r"ss \1", text, flags=re.IGNORECASE)
     text = re.sub(r"\b(?:Paragraph|Par\.|para\.)\s+(\d+)", r"para \1", text, flags=re.IGNORECASE)
@@ -142,26 +121,27 @@ def normalize_stellenbosch_citations(text: str) -> str:
 
 
 def parse_docx_file(file_bytes: bytes) -> str:
-    """Extracts text from Word documents."""
     doc = docx.Document(io.BytesIO(file_bytes))
     return "\n\n".join([para.text.strip() for para in doc.paragraphs if para.text.strip()])
 
 
 def parse_pdf_draft(file_bytes: bytes) -> str:
-    """Extracts plain text from draft PDFs."""
+    """Extracts plain text from draft PDFs, using reading-order extraction to avoid
+    footnotes/headers interleaving into the middle of sentences."""
     doc = fitz.open(stream=file_bytes, filetype="pdf")
-    pages_text = [page.get_text("text").strip() for page in doc if page.get_text("text").strip()]
+    pages_text = [page.get_text("text", sort=True).strip() for page in doc if page.get_text("text", sort=True).strip()]
     doc.close()
     return clean_legal_text("\n\n".join(pages_text))
 
 
 def parse_and_anchor_pdf(file_bytes: bytes) -> str:
-    """Extracts PDF text and injects structural [[PAGE X]] markers."""
+    """Extracts PDF text and injects structural [[PAGE X]] markers, using
+    reading-order extraction to avoid footnotes/headers interleaving mid-sentence."""
     anchored_text = []
     try:
         doc = fitz.open(stream=file_bytes, filetype="pdf")
         for page_num in range(len(doc)):
-            page_text = clean_legal_text(doc[page_num].get_text("text"))
+            page_text = clean_legal_text(doc[page_num].get_text("text", sort=True))
             anchored_text.append(f"[[PAGE {page_num + 1}]]\n{page_text}")
         doc.close()
     except Exception:
@@ -175,7 +155,6 @@ def parse_and_anchor_pdf(file_bytes: bytes) -> str:
 
 
 def generate_docx_download(annotated_text: str, citation_style: str) -> bytes:
-    """Generates an academic-formatted .docx file."""
     doc = docx.Document()
     for section in doc.sections:
         section.top_margin = Inches(1)
@@ -281,7 +260,6 @@ def main():
     st.caption("Created by Aidan Roach | Faculty of Law, Stellenbosch University (Free Gemini Edition)")
     st.info("🔔 This tool runs on a free-tier API. If it stops responding, the daily free usage limit has likely been reached — please try again later.")
 
-    # --- SIDEBAR ---
     st.sidebar.header("⚙️ Configuration")
     citation_style = st.sidebar.selectbox(
         "Faculty Citation Style",
@@ -305,13 +283,11 @@ def main():
         `ss 14-16 of the Companies Act 71 of 2008`
         """)
 
-    # --- BANNERS ---
     st.warning(
         "📌 **Quotation Requirement:** Enclose every statement or claim you want pinpointed inside **quotation marks** (e.g., *\"the right to dignity is non-derogable\"*).")
     st.info(
         "ℹ️ **SU Faculty Notice:** Enforces the mandatory **footnote referencing system** (`[^1]`). In-text parenthetical citations are not permitted under SU guidelines.")
 
-    # --- MAIN COLUMNS ---
     col1, col2 = st.columns([1, 1], gap="large")
 
     draft_input_text = ""
@@ -321,17 +297,14 @@ def main():
 
         if draft_mode == "Paste Text Directly":
             saved_draft = local_storage.getItem("user_draft_text") or ""
-
             draft_input_text = st.text_area(
                 "Paste assignment here:",
                 value=saved_draft,
                 height=300,
                 key="draft_text_input"
             )
-
             if draft_input_text:
                 local_storage.setItem("user_draft_text", draft_input_text)
-
         else:
             uploaded_draft = st.file_uploader("Upload Word or PDF:", type=["docx", "pdf"])
             if uploaded_draft:
@@ -357,7 +330,6 @@ def main():
 
     st.markdown("---")
 
-    # --- ACTION BUTTON ---
     if st.button("🔍 Scan & Generate Pinpoints", type="primary", use_container_width=True):
         if not draft_input_text.strip():
             st.error("Please provide a draft.")
@@ -391,7 +363,6 @@ def main():
                 else:
                     st.error("Something went wrong while scanning. Please try again in a moment.")
 
-    # --- RESULTS ---
     if "audit_report" in st.session_state:
         report: AuditReport = st.session_state["audit_report"]
 
