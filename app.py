@@ -57,16 +57,18 @@ def clean_legal_text(text: str) -> str:
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
+
 def verify_excerpt_in_source(excerpt: str, source_text: str) -> bool:
     """Checks whether a claimed 'verbatim' excerpt actually appears in the source text.
     Tolerant of PDF-extraction noise (hyphenated line breaks, curly quotes, extra
     spacing) without loosening how many actual words must match."""
+
     def normalize(t: str) -> str:
-        t = t.replace("\u2018", "'").replace("\u2019", "'")   # curly single quotes
-        t = t.replace("\u201c", '"').replace("\u201d", '"')   # curly double quotes
-        t = re.sub(r"-\s*\n\s*", "", t)                       # de-hyphenate line breaks
-        t = re.sub(r"\s+", " ", t)                            # collapse all whitespace
-        t = re.sub(r"[^\w\s]", "", t)                         # drop punctuation entirely
+        t = t.replace("\u2018", "'").replace("\u2019", "'")
+        t = t.replace("\u201c", '"').replace("\u201d", '"')
+        t = re.sub(r"-\s*\n\s*", "", t)
+        t = re.sub(r"\s+", " ", t)
+        t = re.sub(r"[^\w\s]", "", t)
         return t.strip().lower()
 
     normalized_excerpt = normalize(excerpt)
@@ -75,8 +77,12 @@ def verify_excerpt_in_source(excerpt: str, source_text: str) -> bool:
     if len(normalized_excerpt) < 10:
         return False
 
-    return normalized_excerpt in normalized_sourcedef count_occurrences_in_source(excerpt: str, source_text: str) -> int:
+    return normalized_excerpt in normalized_source
+
+
+def count_occurrences_in_source(excerpt: str, source_text: str) -> int:
     """Counts how many times a normalized excerpt appears in the source text."""
+
     def normalize(t: str) -> str:
         t = t.replace("\u2018", "'").replace("\u2019", "'")
         t = t.replace("\u201c", '"').replace("\u201d", '"')
