@@ -59,13 +59,16 @@ def clean_legal_text(text: str) -> str:
 
 def _normalize_for_matching(t: str) -> str:
     """Shared normalization used by both the verification and duplicate-count checks.
-    Handles curly quotes, hyphenated line breaks, and punctuation/whitespace noise
-    introduced by PDF text extraction."""
+    Handles curly quotes, hyphenated line breaks, punctuation/whitespace noise, and
+    stray digits (page numbers, footnote markers) that PDF extraction can insert
+    mid-sentence — since both sides of the comparison are normalized identically,
+    stripping digits doesn't create false positives, only removes false negatives."""
     t = t.replace("\u2018", "'").replace("\u2019", "'")
     t = t.replace("\u201c", '"').replace("\u201d", '"')
     t = re.sub(r"-\s*\n\s*", "", t)
-    t = re.sub(r"\s+", " ", t)
+    t = re.sub(r"\d+", "", t)
     t = re.sub(r"[^\w\s]", "", t)
+    t = re.sub(r"\s+", " ", t)
     return t.strip().lower()
 
 
