@@ -56,12 +56,10 @@ def _tokenize(t: str) -> List[str]:
 
 
 def _find_match_starts(excerpt_words: List[str], source_words: List[str], max_gap: int = 10) -> List[int]:
-    """Finds every position in source_words where excerpt_words appears in order,
-    allowing up to `max_gap` unrelated words between each pair of matched words
-    (to tolerate footnote numbers, page numbers, and running headers that PDF
-    extraction sometimes inserts mid-sentence). Every actual word of the excerpt
-    still has to be found, in the right order — this does not allow substitutions,
-    only insertions, so a genuinely fabricated quote will not pass."""
+    """Finds every position where excerpt_words appears in source_words in order,
+    allowing up to `max_gap` unrelated words between matched words (to tolerate
+    footnotes/page numbers/headers PDF extraction inserts mid-sentence). Every
+    actual word of the excerpt still has to be found, in order — no substitutions."""
     starts = []
     n, m = len(source_words), len(excerpt_words)
     if m == 0:
@@ -90,8 +88,6 @@ def _find_match_starts(excerpt_words: List[str], source_words: List[str], max_ga
 
 
 def verify_excerpt_in_source(excerpt: str, source_text: str) -> bool:
-    """Checks whether a claimed 'verbatim' excerpt's words all appear, in order,
-    in the source text (tolerant of small PDF-extraction insertions)."""
     excerpt_words = _tokenize(excerpt)
     source_words = _tokenize(source_text)
     if len(excerpt_words) < 4:
@@ -100,7 +96,6 @@ def verify_excerpt_in_source(excerpt: str, source_text: str) -> bool:
 
 
 def count_occurrences_in_source(excerpt: str, source_text: str) -> int:
-    """Counts how many separate positions in the source match the excerpt."""
     excerpt_words = _tokenize(excerpt)
     source_words = _tokenize(source_text)
     if len(excerpt_words) < 4:
@@ -111,8 +106,7 @@ def count_occurrences_in_source(excerpt: str, source_text: str) -> int:
 def cross_check_audit_report(report: "AuditReport", sources: List[dict]) -> "AuditReport":
     """Re-checks every audit item's claimed excerpt against the real source text.
     Downgrades to UNVERIFIED if the excerpt cannot be found, and flags with an
-    asterisk if the excerpt appears more than once. Matches sources loosely,
-    since the model doesn't always echo back the exact title string typed in."""
+    asterisk if the excerpt appears more than once."""
 
     def find_source_text(claimed_title: str) -> str:
         claimed_lower = claimed_title.lower().strip()
@@ -161,6 +155,8 @@ def parse_pdf_draft(file_bytes: bytes) -> str:
 
 
 def parse_and_anchor_pdf(file_bytes: bytes) -> str:
+    """Extracts PDF text and injects structural [[PAGE X]] markers, used by both
+    the Citation Pinpointer and the Source Finder to ground page-number claims."""
     anchored_text = []
     try:
         doc = fitz.open(stream=file_bytes, filetype="pdf")
@@ -215,7 +211,7 @@ def generate_docx_download(annotated_text: str, citation_style: str) -> bytes:
 
 
 # ==========================================
-# 2. SCHEMA & GEMINI INFERENCE ENGINE
+# 2. SCHEMAS & GEMINI INFERENCE — CITATION PINPOINTER
 # ==========================================
 
 GEMINI_MODEL_NAME = "gemini-3.6-flash"
@@ -272,14 +268,101 @@ def run_citation_audit_gemini(
 
 
 # ==========================================
-# 3. STREAMLIT INTERFACE
+# 3. SCHEMAS & GEMINI INFERENCE — SOURCE FINDER
 # ==========================================
 
-def main():
-    st.set_page_config(page_title="SU Law Citation Pinpointer", page_icon="⚖️", layout="wide")
+SOURCE_FINDER_SYSTEM_PROMPT = """You are a research assistant for a South African law student.
+You are given one or more study QUESTIONS, and one or more SOURCE documents whose text
+has been annotated with [[PAGE X]] markers showing where each page begins.
 
-    local_storage = LocalStorage()
+For EACH question, find every source location that is genuinely relevant, and report:
+- which source it's in (echo back the source title EXACTLY as given, e.g. "Source 1")
+- the page number(s), taken directly from the nearest [[PAGE X]] marker before the
+  relevant text — never guess a page number that isn't backed by a [[PAGE X]] marker
+- a one-sentence explanation of why that location answers or relates to the question
 
+If a question has no relevant match in any source, still include it in the output with
+location "[NOT FOUND IN PROVIDED SOURCES]" and an empty explanation.
+Do not invent page numbers. Only use page numbers that appear as [[PAGE X]] markers in
+the provided source text.
+"""
+
+
+class SourceLocationItem(BaseModel):
+    question: str = Field(description="The exact question this result answers.")
+    source_title: str = Field(description="Title/label of the source document, echoed exactly as given.")
+    page_reference: str = Field(description="Page number(s) where the relevant content appears, e.g. 'Page 12' or 'Pages 4-5'.")
+    relevance_summary: str = Field(description="One sentence on why this location is relevant to the question.")
+
+
+class SourceFinderReport(BaseModel):
+    results: List[SourceLocationItem] = Field(description="One or more location results per question.")
+
+
+def _extract_claimed_pages(page_reference: str) -> List[int]:
+    """Pulls out every integer mentioned in a claimed page reference string."""
+    return [int(n) for n in re.findall(r"\d+", page_reference)]
+
+
+def cross_check_source_finder_report(report: "SourceFinderReport", sources: List[dict]) -> "SourceFinderReport":
+    """Confirms every claimed page number actually exists as a [[PAGE X]] marker in
+    the matched source's text, so the tool can't casually invent a page reference."""
+
+    def find_source_text(claimed_title: str) -> str:
+        claimed_lower = claimed_title.lower().strip()
+        for s in sources:
+            if s["title"].lower().strip() == claimed_lower:
+                return s["content"]
+        for s in sources:
+            if s["title"].lower().strip() in claimed_lower or claimed_lower in s["title"].lower().strip():
+                return s["content"]
+        if len(sources) == 1:
+            return sources[0]["content"]
+        return ""
+
+    for item in report.results:
+        if "NOT FOUND" in item.page_reference.upper():
+            continue
+
+        source_text = find_source_text(item.source_title)
+        existing_pages = set(int(p) for p in re.findall(r"\[\[PAGE (\d+)\]\]", source_text))
+        claimed_pages = _extract_claimed_pages(item.page_reference)
+
+        if not claimed_pages or not all(p in existing_pages for p in claimed_pages):
+            item.page_reference = f"{item.page_reference} ⚠️ [UNVERIFIED - PAGE NOT CONFIRMED IN SOURCE]"
+
+    return report
+
+
+def run_source_finder_gemini(
+        questions_text: str,
+        sources: List[dict],
+        gemini_key: str
+) -> SourceFinderReport:
+    client = genai.Client(api_key=gemini_key)
+
+    formatted_sources = "\n\n".join([f"=== SOURCE: {s['title']} ===\n{s['content']}" for s in sources])
+    user_prompt = f"QUESTIONS:\n{questions_text}\n\nSOURCES:\n{formatted_sources}"
+
+    response = client.models.generate_content(
+        model=GEMINI_MODEL_NAME,
+        contents=user_prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=SOURCE_FINDER_SYSTEM_PROMPT,
+            temperature=0.0,
+            response_mime_type="application/json",
+            response_schema=SourceFinderReport,
+        ),
+    )
+
+    return SourceFinderReport.model_validate_json(response.text)
+
+
+# ==========================================
+# 4. PAGE: CITATION PINPOINTER
+# ==========================================
+
+def citation_pinpointer_page(local_storage: LocalStorage):
     st.title("⚖️ Stellenbosch Law Citation Pinpointer & Audit Tool")
     st.caption("Created by Aidan Roach | Faculty of Law, Stellenbosch University (Free Gemini Edition)")
     st.info("🔔 This tool runs on a free-tier API. If it stops responding, the daily free usage limit has likely been reached — please try again later.")
@@ -295,7 +378,7 @@ def main():
     st.sidebar.subheader("🔑 API Key")
 
     env_key = os.getenv("GEMINI_API_KEY", "")
-    gemini_api_key = st.sidebar.text_input("Gemini API Key (Free)", value=env_key, type="password")
+    gemini_api_key = st.sidebar.text_input("Gemini API Key (Free)", value=env_key, type="password", key="citation_api_key")
 
     with st.sidebar.expander("📖 SU Citation Cheat Sheet"):
         st.markdown("""
@@ -339,13 +422,13 @@ def main():
 
     with col2:
         st.subheader("2. Reference Source Materials")
-        num_sources = st.number_input("Number of Sources", min_value=1, max_value=5, value=2)
+        num_sources = st.number_input("Number of Sources", min_value=1, max_value=5, value=2, key="citation_num_sources")
         sources_payload = []
 
         for i in range(int(num_sources)):
             st.markdown(f"**Source #{i + 1}**")
-            src_title = st.text_input(f"Source Title #{i + 1}", value=f"Source {i + 1}", key=f"t_{i}")
-            src_file = st.file_uploader(f"Upload Source PDF #{i + 1}", type=["pdf"], key=f"f_{i}")
+            src_title = st.text_input(f"Source Title #{i + 1}", value=f"Source {i + 1}", key=f"cite_t_{i}")
+            src_file = st.file_uploader(f"Upload Source PDF #{i + 1}", type=["pdf"], key=f"cite_f_{i}")
 
             if src_file:
                 parsed_text = parse_and_anchor_pdf(src_file.read())
@@ -421,6 +504,114 @@ def main():
                 "Verbatim Excerpt": item.verbatim_source_excerpt
             } for item in report.audit_items]
             st.dataframe(pd.DataFrame(table_data), use_container_width=True)
+
+
+# ==========================================
+# 5. PAGE: SOURCE FINDER
+# ==========================================
+
+def source_finder_page():
+    st.title("🔍 Source Finder — Find Where to Look")
+    st.caption("Ask study questions, upload your textbook/cases, and get the page numbers to read.")
+    st.info("🔔 This tool runs on a free-tier API. If it stops responding, the daily free usage limit has likely been reached — please try again later.")
+    st.warning("⚠️ **This tool is not perfect.** Page references are cross-checked against the uploaded document, but always confirm the content on that page actually answers your question before relying on it.")
+
+    st.sidebar.header("⚙️ Configuration")
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🔑 API Key")
+    env_key = os.getenv("GEMINI_API_KEY", "")
+    gemini_api_key = st.sidebar.text_input("Gemini API Key (Free)", value=env_key, type="password", key="finder_api_key")
+
+    col1, col2 = st.columns([1, 1], gap="large")
+
+    with col1:
+        st.subheader("1. Your Questions")
+        questions_text = st.text_area(
+            "Type one question per line:",
+            height=250,
+            placeholder="e.g.\nWhat is the test for a valid affirmative action measure?\nHow does the Constitutional Court define equality across difference?",
+            key="finder_questions"
+        )
+
+    with col2:
+        st.subheader("2. Source Materials (Textbook / Cases)")
+        num_sources = st.number_input("Number of Sources", min_value=1, max_value=5, value=1, key="finder_num_sources")
+        sources_payload = []
+
+        for i in range(int(num_sources)):
+            st.markdown(f"**Source #{i + 1}**")
+            src_title = st.text_input(f"Source Title #{i + 1}", value=f"Source {i + 1}", key=f"find_t_{i}")
+            src_file = st.file_uploader(f"Upload Source PDF #{i + 1}", type=["pdf"], key=f"find_f_{i}")
+
+            if src_file:
+                parsed_text = parse_and_anchor_pdf(src_file.read())
+                sources_payload.append({"title": src_title, "content": parsed_text})
+                st.success(f"Parsed {src_file.name}")
+
+    st.markdown("---")
+
+    if st.button("📍 Find Relevant Pages", type="primary", use_container_width=True):
+        if not questions_text.strip():
+            st.error("Please enter at least one question.")
+            return
+        if not sources_payload:
+            st.error("Please upload at least one source PDF.")
+            return
+        if not gemini_api_key:
+            st.error("Missing Gemini API key! Paste it in the sidebar or save it in your .env file.")
+            return
+
+        with st.spinner("Searching sources with Gemini..."):
+            try:
+                report = run_source_finder_gemini(
+                    questions_text=questions_text,
+                    sources=sources_payload,
+                    gemini_key=gemini_api_key
+                )
+                report = cross_check_source_finder_report(report, sources_payload)
+                st.session_state["finder_report"] = report
+                st.success("Search Complete!")
+            except Exception as e:
+                error_text = str(e)
+                if "429" in error_text or "RESOURCE_EXHAUSTED" in error_text:
+                    st.error(
+                        "🚦 This tool is being used a lot right now and has hit its free daily limit. Please come back in a little while and try again.")
+                else:
+                    st.error("Something went wrong while searching. Please try again in a moment.")
+
+    if "finder_report" in st.session_state:
+        report: SourceFinderReport = st.session_state["finder_report"]
+        st.markdown("## 📖 Where to Look")
+
+        table_data = [{
+            "Question": item.question,
+            "Source": item.source_title,
+            "Page(s)": item.page_reference,
+            "Why relevant": item.relevance_summary,
+        } for item in report.results]
+        st.dataframe(pd.DataFrame(table_data), use_container_width=True)
+
+
+# ==========================================
+# 6. MAIN APP ROUTER
+# ==========================================
+
+def main():
+    st.set_page_config(page_title="SU Law Tools", page_icon="⚖️", layout="wide")
+
+    local_storage = LocalStorage()
+
+    page = st.sidebar.radio(
+        "📂 Choose a tool",
+        ["⚖️ Citation Pinpointer", "🔍 Source Finder"],
+        key="page_selector"
+    )
+    st.sidebar.markdown("---")
+
+    if page == "⚖️ Citation Pinpointer":
+        citation_pinpointer_page(local_storage)
+    else:
+        source_finder_page()
 
 
 if __name__ == "__main__":
